@@ -8,7 +8,7 @@ as.data.table.raster.terra <- function(x, row.names = NULL, optional = FALSE, xy
   } else {
     tr <- terra::blocks(x)
     l <- lapply(1:tr$n, function(i) {
-      DT <- as.data.table(as.data.frame(terra::values(x, row = tr$row[i], nrows = tr$nrows[i]), ...))
+      DT <- data.table::as.data.table(as.data.frame(terra::values(x, row = tr$row[i], nrows = tr$nrows[i]), ...))
       if(xy == TRUE) {
         cells <- terra::cellFromRowCol(x, c(tr$row[i], tr$row[i] + tr$nrows[i] - 1), c(1, ncol(x)))
         coords <- terra::xyFromCell(x, cell = cells[1]:cells[2])
@@ -16,11 +16,11 @@ as.data.table.raster.terra <- function(x, row.names = NULL, optional = FALSE, xy
       }
       DT
     })
-    v <- rbindlist(l)
+    v <- data.table::rbindlist(l)
     coln <- names(x)
     if(xy) {
       coln <- c("x", "y", coln)
-      setcolorder(v, coln)
+      data.table::setcolorder(v, coln)
     }
   }
   v
@@ -40,8 +40,17 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
   # Data.table of weights
   weights_dt <- data.table::as.data.table(overlay_weights)
 
-  ## read in climate data
-  clim_stack <- terra::rast(data)
+  # read in climate data and coerce if not a spat raster
+  if(methods::is(data,"SpatRaster")){
+
+    clim_stack <- data
+
+  } else{
+
+    clim_stack <- terra::rast(data)
+
+  }
+
 
   # shift into 0 to 360 if not already in that format (inverse of rotate())
   # ----------------------------------------------------------------------------
@@ -55,15 +64,29 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
   # indicates -180_180 format
   if(terra::ext(clim_stack)$xmin <= 0 - terra::xres(clim_stack)) {
 
-  ## create global extent for padding so rotate function can be used
-  global_extent <- terra::ext(-180, 180, -90, 90)
+    # If it's on both sides of 0, use rotate
+    if(terra::ext(clim_stack)$xmax > 0){
 
-  ## pad
-  clim_stack <- terra::extend(clim_stack, global_extent)
+      # create global extent for padding so rotate function can be used
+      global_extent <- terra::ext(-180, 180, -90, 90)
+
+      # pad
+      clim_stack <- terra::extend(clim_stack, global_extent)
 
 
-  ## rotate
-  clim_stack <- terra::rotate(clim_stack, left = FALSE)
+      # rotate
+      clim_stack <- terra::rotate(clim_stack, left = FALSE)
+
+    } else{ # If it's only negative, use shift (much faster)
+
+      clim_stack <- terra::shift(clim_stack, dx = 360)
+    }
+
+
+
+
+
+
 
   }
 
@@ -92,7 +115,7 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
       dplyr::mutate(
         diff = x_vector - dplyr::lag(x_vector),
         is_right_xmin = diff == max(diff, na.rm = TRUE),
-        is_left_xmax = lead(diff) == max(diff, na.rm = TRUE)
+        is_left_xmax = dplyr::lead(diff) == max(diff, na.rm = TRUE)
         )
 
     right_xmin <- crop_locs %>%
@@ -112,8 +135,8 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
     right_xmin <- right_xmin - 2*terra::xres(clim_stack)
     right_xmax <- 360 + 2*terra::xres(clim_stack)
 
-    ymin <- min(weights_dt$y) - 2*terra::yres(data)
-    ymax <- max(weights_dt$y) + 2*terra::yres(data)
+    ymin <- min(weights_dt$y) - 2*terra::yres(clim_stack)
+    ymax <- max(weights_dt$y) + 2*terra::yres(clim_stack)
 
     weights_ext_left <- terra::ext(left_xmin, left_xmax, ymin, ymax)
     weights_ext_right <- terra::ext(right_xmin, right_xmax, ymin, ymax)
@@ -193,7 +216,7 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
 
     # Average over each set of layers representing one day
     indices<-rep(1:(terra::nlyr(clim_stack)/timesteps_per_day),each=timesteps_per_day)
-    clim_daily <- terra::tapp(clim_stack, indices = indices, fun=mean)
+    clim_daily <- terra::tapp(clim_stack, indices, fun=mean)
   }
 
   ## Sum
@@ -203,7 +226,7 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
 
     # Sum over each set of layers representing one day
     indices<-rep(1:(terra::nlyr(clim_stack)/timesteps_per_day),each=timesteps_per_day)
-    clim_daily <- terra::tapp(clim_stack, indices = indices, fun=sum)
+    clim_daily <- terra::tapp(clim_stack, indices, fun=sum)
   }
 
 
@@ -215,8 +238,17 @@ daily_aggregation <- function(data, overlay_weights, daily_agg, time_interval='1
 # Function to infer date-times for spatRaster layers based on a time interval
 infer_layer_datetimes <- function(data, start_date, time_interval) {
 
-  # Turn the data into a raster stack in case it's a spatRaster
-  clim_stack <- terra::rast(data)
+  # Running rast() on a stack that's already a spat raster removes the values for some reason
+  # read in climate data and coerce if not a spat raster
+  if(methods::is(data, "SpatRaster")){
+
+    clim_stack <- data
+
+  } else{
+
+    clim_stack <- terra::rast(data)
+
+  }
 
   # Number of layers in the spatRaster stack
   num_layers <- terra::nlyr(clim_stack)
@@ -354,7 +386,7 @@ polygon_aggregation <- function(clim_dt, weights_dt, list_names, time_agg){
 #'
 #' @examples
 #' polynomial_output <- staggregate_polynomial(
-#'   data = temp_nj_jun_2024_era5 - 273.15, # Climate data to transform and
+#'   data = terra::rast(temp_nj_jun_2024_era5) - 273.15, # Climate data to transform and
 #'                                          # aggregate
 #'   overlay_weights = overlay_weights_nj, # Output from overlay_weights()
 #'   daily_agg = "average", # Average hourly values to produce daily values
@@ -480,7 +512,7 @@ staggregate_polynomial <- function(data, overlay_weights, daily_agg, time_agg = 
 #'
 #' @examples
 #' spline_output <- staggregate_spline(
-#' data = temp_nj_jun_2024_era5 - 273.15, # Climate data to transform and
+#' data = terra::rast(temp_nj_jun_2024_era5) - 273.15, # Climate data to transform and
 #'                                        # aggregate
 #' overlay_weights = overlay_weights_nj, # Output from overlay_weights()
 #' daily_agg = "average", # Average hourly values to produce daily values
@@ -634,7 +666,7 @@ staggregate_spline <- function(data, overlay_weights, daily_agg, time_agg = "mon
 #'
 #' @examples
 #' bin_output <- staggregate_bin(
-#'   data = temp_nj_jun_2024_era5 - 273.15, # Climate data to transform and
+#'   data = terra::rast(temp_nj_jun_2024_era5) - 273.15, # Climate data to transform and
 #'                                          # aggregate
 #'   overlay_weights = overlay_weights_nj, # Output from overlay_weights()
 #'   daily_agg = "average", # Average hourly values to produce daily values
@@ -701,7 +733,7 @@ staggregate_bin <- function(data, overlay_weights, daily_agg, time_agg = "month"
       clim_daily_table <- ifelse(min(bin_breaks) > clim_daily_table, 1, 0)
     }
     else if(x == length(bin_breaks)){
-      clim_daily_table <- ifelse(max(bin_breaks) < clim_daily_table, 1, 0)
+      clim_daily_table <- ifelse(max(bin_breaks) <= clim_daily_table, 1, 0)
     }
     else{
       clim_daily_table <- ifelse(bin_breaks[x] <= clim_daily_table &
@@ -786,7 +818,7 @@ staggregate_bin <- function(data, overlay_weights, daily_agg, time_agg = "month"
 #'
 #' @examples
 #' degree_days_output <- staggregate_degree_days(
-#'   data = temp_nj_jun_2024_era5 - 273.15, # Climate data to transform and
+#'   data = terra::rast(temp_nj_jun_2024_era5) - 273.15, # Climate data to transform and
 #'                                          # aggregate
 #'   overlay_weights = overlay_weights_nj, # Output from overlay_weights()
 #'   time_agg = "month", # Sum the transformed daily values across months
